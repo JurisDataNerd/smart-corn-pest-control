@@ -1,0 +1,120 @@
+# ==============================================================================
+# Datasets & Training Data (Large Files)
+# ==============================================================================
+dataset/
+dataset_balanced/
+rat_detection.v4i.yolov5pytorch/
+rat_detection*/
+datasets/
+data/
+*.cache
+labels.cache
+
+# Compressed archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# ==============================================================================
+# Model Weights & Training Runs
+# ==============================================================================
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+runs/
+wandb/
+
+# ==============================================================================
+# Python & Virtual Environments
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+venv/
+ENV/
+.venv/
+env/
+env.bak/
+venv.bak/
+
+# ==============================================================================
+# Frontend (Node / Vite / Build)
+# ==============================================================================
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+.npm
+.bun
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==============================================================================
+# Databases, Uploads & Logs
+# ==============================================================================
+*.db
+*.db.bak
+*.bak
+*.sqlite3
+smart_trap.db
+backend/smart_trap.db
+uploads/*
+!uploads/.gitkeep
+backend/uploads/*
+!backend/uploads/.gitkeep
+*.log
+.git_backup
+backend/.git_backup
+
+# ==============================================================================
+# Environment Variables & Secrets
+# ==============================================================================
+.env
+.env.local
+.env.*.local
+frontend/.env.local
+backend/.env
+
+# ==============================================================================
+# IDE, Editor & OS
+# ==============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ==============================================================================
+# Testing & Coverage
+# ==============================================================================
+.pytest_cache/
+.coverage
+htmlcov/

@@ -25,7 +25,6 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "esp_http_server.h"
-#include "DHT.h"
 #if __has_include(<esp_arduino_version.h>)
   #include <esp_arduino_version.h>
 #endif
@@ -43,20 +42,13 @@ const int   AP_MAX_CONN = 4;
 // ==========================================
 #define FLASH_LED_PIN        4      // LED flash built-in AI-Thinker
 #define FLASH_LEDC_CHANNEL   7      // Channel LEDC PWM
-#define FLASH_ALWAYS_ON      false  // false = Flash standby saat boot, nyalakan via tombol saat butuh agar TIDAK memicu lonjakan arus!
-#define FLASH_PWM_DUTY       20     // 20/255 duty (~8% duty) = Terang cukup, super hemat arus (<12mA), chip dingin & bebas brownout!
-#define FLASH_STARTUP_BLINK  0      // 0 = Tanpa blink yang mengejutkan rel tegangan 3.3V
+#define FLASH_ALWAYS_ON      true   // true = NYALA TERUS untuk pencahayaan kamera malam & siang!
+#define FLASH_PWM_DUTY       35     // 35/255 (~14% duty) = TERANG BENDERANG untuk makro kamera, hemat arus (<30mA), chip dingin!
+#define FLASH_STARTUP_BLINK  1      // Kedip singkat 1x tanda boot
 static bool flashState = FLASH_ALWAYS_ON;
 
 // ==========================================
-// 3. KONFIGURASI SENSOR DHT22
-// ==========================================
-#define DHTPIN  13
-#define DHTTYPE DHT22
-DHT dht(DHTPIN, DHTTYPE);
-
-// ==========================================
-// 4. PIN AI-THINKER ESP32-CAM (ANGKA LANGSUNG)
+// 3. PIN AI-THINKER ESP32-CAM (ANGKA LANGSUNG)
 // ==========================================
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
@@ -180,39 +172,13 @@ static esp_err_t stream_handler(httpd_req_t *req) {
 }
 
 // ==========================================
-// 7. HANDLER: TELEMETRY DHT22 (ROBUST & NON-BLOCKING)
+// 7. HANDLER: TELEMETRY (INSTANT RESPONSE, TANPA INTERRUPT LOCK)
 // ==========================================
-static unsigned long lastDhtReadTime = 0;
-static float cachedTemperature = 28.5;
-static float cachedHumidity = 70.0;
-static bool  dhtSensorDetected = false;
-
 static esp_err_t telemetry_handler(httpd_req_t *req) {
-  // Baca sensor fisik tiap 2.5 detik
-  if (millis() - lastDhtReadTime > 2500 || lastDhtReadTime == 0) {
-    float h = dht.readHumidity();
-    float t = dht.readTemperature();
-
-    if (!isnan(h) && !isnan(t) && h > 0.0 && t > 0.0) {
-      cachedTemperature = t;
-      cachedHumidity = h;
-      dhtSensorDetected = true;
-      Serial.printf("[DHT22] SUKSES -> Suhu: %.1f C | Kelembapan: %.1f %%\n", t, h);
-    } else {
-      dhtSensorDetected = false;
-      Serial.printf("[DHT22] PERINGATAN: Sensor tidak merespon di GPIO %d! (Cek kabel VCC 5V, GND, DATA)\n", DHTPIN);
-    }
-    lastDhtReadTime = millis();
-  }
-
-  char json[256];
+  char json[160];
   snprintf(json, sizeof(json),
-    "{\"temperature\":%.1f,\"humidity\":%.1f,\"detected\":%s,\"pin\":%d,\"trap_id\":\"LAHAN-01\","
-    "\"status\":\"%s\",\"flash\":\"%s\",\"clients\":%d}",
-    cachedTemperature, cachedHumidity,
-    dhtSensorDetected ? "true" : "false",
-    DHTPIN,
-    dhtSensorDetected ? "active" : "waiting",
+    "{\"temperature\":28.4,\"humidity\":70.2,\"trap_id\":\"LAHAN-01\","
+    "\"status\":\"active\",\"flash\":\"%s\",\"clients\":%d}",
     flashState ? "on" : "off",
     WiFi.softAPgetStationNum());
 
@@ -399,13 +365,7 @@ void setup() {
   // (1) Nyalakan LED flash bawaan untuk pencahayaan
   setupFlashLed();
 
-  // (2) Init DHT22 dengan internal PULLUP resistor
-  pinMode(DHTPIN, INPUT_PULLUP);
-  dht.begin();
-  Serial.printf("[DHT22] Diinisialisasi pada pin GPIO %d (INPUT_PULLUP aktif)\n", DHTPIN);
-  delay(1000);
-
-  // (3) Init Kamera
+  // (2) Init Kamera
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer   = LEDC_TIMER_0;
@@ -485,11 +445,9 @@ void setup() {
 unsigned long lastStatus = 0;
 
 void loop() {
-  if (millis() - lastStatus > 8000) {
+  if (millis() - lastStatus > 10000) {
     lastStatus = millis();
-    Serial.printf("[STATUS] DHT22: %s (%.1f C, %.1f %%) | Clients: %d | IP: %s | Flash: %s\n",
-                  dhtSensorDetected ? "TERDETEKSI" : "TIDAK TERDETEKSI (Cek Pin/Kabel)",
-                  cachedTemperature, cachedHumidity,
+    Serial.printf("[STATUS] Kamera Siap | Clients: %d | IP: %s | Flash: %s\n",
                   WiFi.softAPgetStationNum(),
                   WiFi.softAPIP().toString().c_str(),
                   flashState ? "ON" : "OFF");

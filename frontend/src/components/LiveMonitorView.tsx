@@ -117,11 +117,38 @@ export const LiveMonitorView: React.FC = () => {
     return () => clearInterval(timer);
   }, [isConnected, autoDetect, isDetecting]);
 
-  // Pantau sensor suhu dan kelembapan DHT22 secara realtime
+  // Pantau sensor suhu dan kelembapan DHT22 secara realtime (Fleksibel & Otomatis)
   useEffect(() => {
     const getTelemetry = async () => {
       try {
-        const data = await fetchLatestTelemetry();
+        let data: TelemetryData | null = null;
+
+        // 1. Ambil data langsung dari alamat ESP32 yang dihubungkan
+        if (isConnected && streamUrl) {
+          try {
+            const deviceTelemetryUrl = streamUrl.replace(/\/stream\/?$/, '/telemetry');
+            const res = await fetch(deviceTelemetryUrl, {
+              signal: AbortSignal.timeout ? AbortSignal.timeout(2000) : undefined,
+            });
+            if (res.ok) {
+              data = await res.json();
+              // Sinkronkan ke backend lokal laptop saat ini agar tersimpan di riwayat & database
+              fetch('/api/v1/telemetry', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data),
+              }).catch(() => {});
+            }
+          } catch {
+            // Jika direct fetch belum merespons, fallback ke data backend
+          }
+        }
+
+        // 2. Fallback: Ambil data dari backend lokal
+        if (!data) {
+          data = await fetchLatestTelemetry();
+        }
+
         setTelemetry(data);
 
         // Kirim Push Notification jika suhu / kelembapan DHT22 tidak ideal saat terhubung
@@ -139,7 +166,7 @@ export const LiveMonitorView: React.FC = () => {
       }
     }, 3000);
     return () => clearInterval(interval);
-  }, [isConnected]);
+  }, [isConnected, streamUrl]);
 
   const handleToggleNotification = async () => {
     const granted = await requestNotificationPermission();
@@ -260,11 +287,11 @@ export const LiveMonitorView: React.FC = () => {
                 type="text"
                 value={streamUrl}
                 onChange={(e) => setStreamUrl(e.target.value)}
-                placeholder="Contoh: http://192.168.1.100:81/stream"
+                placeholder="Contoh: http://192.168.1.111:81/stream atau http://smart-trap.local:81/stream"
                 className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-mono text-slate-800 focus:border-emerald-500 focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
               />
               <span className="text-[11px] text-slate-400 self-center">
-                Mendukung format MJPEG Stream ESP32
+                Mendukung IP lokal ESP32 & Domain mDNS (smart-trap.local)
               </span>
             </div>
           </div>

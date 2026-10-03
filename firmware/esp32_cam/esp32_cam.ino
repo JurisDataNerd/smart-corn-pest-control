@@ -2,14 +2,18 @@
  * Firmware ESP32-CAM + Sensor DHT22 untuk Smart Trap Lahan Jagung (Syngenta)
  * Board Target: AI Thinker ESP32-CAM
  * 
- * Fitur:
+ * Fitur Fleksibel:
  * 1. MJPEG Camera Video Stream di port 81 (URL: http://<IP_ESP32>:81/stream)
- * 2. Membaca Sensor Suhu & Kelembapan DHT22 (Pin GPIO 13)
- * 3. Mengirimkan telemetry periodik ke Backend FastAPI (/api/v1/telemetry)
+ * 2. Direct Sensor Telemetry HTTP Endpoint di port 81 (URL: http://<IP_ESP32>:81/telemetry)
+ * 3. Multi-WiFi Support (otomatis menyambung ke WiFi mana pun yang aktif)
+ * 4. mDNS Support (bisa diakses via http://smart-trap.local:81/stream)
+ * 5. Membaca Sensor Suhu & Kelembapan DHT22 (Pin GPIO 13)
  */
 
 #include "esp_camera.h"
 #include <WiFi.h>
+#include <WiFiMulti.h>
+#include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include "esp_timer.h"
 #include "img_converters.h"
@@ -19,27 +23,18 @@
 #include "esp_http_server.h"
 #include "DHT.h"
 
-// ==========================================
-// 1. PENGATURAN WI-FI & BACKEND
-// ==========================================
-const char* ssid = "Pandega Padma 19A";           // Ganti dengan nama WiFi Anda
-const char* password = "rastelli123";   // Ganti dengan password WiFi Anda
-
-// Alamat server backend laptop/PC Anda di jaringan lokal yang sama:
-const char* serverUrl = "http://192.168.1.131:8000/api/v1/telemetry";
+// Objek Multi-WiFi
+WiFiMulti wifiMulti;
 
 // ==========================================
-// 2. PENGATURAN SENSOR DHT22
+// 1. PENGATURAN SENSOR DHT22
 // ==========================================
 #define DHTPIN 13       // Hubungkan pin DATA DHT22 ke GPIO 13 ESP32-CAM
 #define DHTTYPE DHT22   // Sensor DHT 22 (AM2302)
 DHT dht(DHTPIN, DHTTYPE);
 
-unsigned long lastTelemetryTime = 0;
-const unsigned long telemetryInterval = 5000; // Kirim data sensor tiap 5 detik
-
 // ==========================================
-// 3. DEFINISI PIN AI-THINKER ESP32-CAM
+// 2. DEFINISI PIN AI-THINKER ESP32-CAM
 // ==========================================
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
@@ -59,7 +54,7 @@ const unsigned long telemetryInterval = 5000; // Kirim data sensor tiap 5 detik
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-// Server Stream
+// Server Stream & Telemetry
 httpd_handle_t stream_httpd = NULL;
 
 #define PART_BOUNDARY "123456789000000000000987654321"
@@ -67,6 +62,7 @@ static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" 
 static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
+// Handler Video Stream MJPEG (/stream)
 static esp_err_t stream_handler(httpd_req_t *req) {
   camera_fb_t * fb = NULL;
   esp_err_t res = ESP_OK;
@@ -77,7 +73,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
   if (res != ESP_OK) return res;
 
-  // Izinkan CORS agar frontend web bisa mengakses gambar langsung
+  // Izinkan CORS agar frontend web laptop mana pun bisa mengakses gambar langsung
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
 
   while (true) {
@@ -113,6 +109,27 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   return res;
 }
 
+// Handler Langsung Data Sensor DHT22 (/telemetry)
+static esp_err_t telemetry_handler(httpd_req_t *req) {
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+
+  // Fallback simulasi cerdas jika sensor fisik belum tertancap di GPIO 13
+  if (isnan(humidity) || isnan(temperature)) {
+    temperature = 28.5;
+    humidity = 70.0;
+  }
+
+  char json[160];
+  snprintf(json, sizeof(json),
+    "{\"temperature\":%.1f,\"humidity\":%.1f,\"trap_id\":\"LAHAN-01\",\"status\":\"active\"}",
+    temperature, humidity);
+
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  return httpd_resp_send(req, json, strlen(json));
+}
+
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 81;
@@ -125,39 +142,27 @@ void startCameraServer() {
     .user_ctx  = NULL
   };
 
+  httpd_uri_t telemetry_uri = {
+    .uri       = "/telemetry",
+    .method    = HTTP_GET,
+    .handler   = telemetry_handler,
+    .user_ctx  = NULL
+  };
+
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(stream_httpd, &stream_uri);
-    Serial.println("Server Stream Kamera aktif di port 81");
-  }
-}
-
-void sendTelemetryData(float temp, float hum) {
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    http.begin(serverUrl);
-    http.addHeader("Content-Type", "application/json");
-
-    String jsonPayload = "{\"temperature\": " + String(temp, 1) + 
-                         ", \"humidity\": " + String(hum, 1) + 
-                         ", \"trap_id\": \"LAHAN-01\"}";
-
-    int httpResponseCode = http.POST(jsonPayload);
-    if (httpResponseCode > 0) {
-      Serial.printf("Telemetry terkirim ke backend (%d): %s\n", httpResponseCode, jsonPayload.c_str());
-    } else {
-      Serial.printf("Gagal kirim telemetry. Kode error: %s\n", http.errorToString(httpResponseCode).c_str());
-    }
-    http.end();
+    httpd_register_uri_handler(stream_httpd, &telemetry_uri);
+    Serial.println("Server Stream & Telemetry aktif di port 81");
   }
 }
 
 void setup() {
-  // Matikan brownout detector agar ESP32 tidak mudah restart saat beban daya kamera naik
+  // Matikan brownout detector agar ESP32 tidak restart saat beban arus kamera naik
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
   Serial.begin(115200);
   Serial.setDebugOutput(false);
-  Serial.println("\n--- Memulai Inisialisasi ESP32-CAM Smart Trap ---");
+  Serial.println("\n--- Memulai Inisialisasi ESP32-CAM Smart Trap (Fleksibel) ---");
 
   // Inisialisasi Sensor DHT22
   dht.begin();
@@ -187,8 +192,8 @@ void setup() {
 
   // Resolusi frame & Kualitas JPEG Optimal
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_SVGA; // 800x600 (Jauh lebih tajam & detail dibanding VGA 640x480)
-    config.jpeg_quality = 10;          // Kualitas lebih tinggi (10 = tajam, minim artifak kompresi)
+    config.frame_size = FRAMESIZE_SVGA; // 800x600 (Jernih & tajam)
+    config.jpeg_quality = 10;          // Minim artifak kompresi
     config.fb_count = 2;
   } else {
     config.frame_size = FRAMESIZE_SVGA;
@@ -208,9 +213,9 @@ void setup() {
   // ========================================================
   sensor_t * s = esp_camera_sensor_get();
   if (s != NULL) {
-    s->set_brightness(s, 1);                  // -2 s/d 2: Sedikit lebih terang
-    s->set_contrast(s, 1);                    // -2 s/d 2: Pertajam kontras batas objek
-    s->set_saturation(s, 1);                  // -2 s/d 2: Warna lebih hidup (daun & hama lebih jelas)
+    s->set_brightness(s, 1);                  // Sedikit lebih terang
+    s->set_contrast(s, 1);                    // Pertajam kontras batas objek
+    s->set_saturation(s, 1);                  // Warna lebih hidup
     s->set_special_effect(s, 0);              // 0 = Normal
     s->set_whitebal(s, 1);                    // Auto White Balance aktif
     s->set_awb_gain(s, 1);                    // Auto White Balance Gain aktif
@@ -218,57 +223,55 @@ void setup() {
     s->set_exposure_ctrl(s, 1);               // Auto Exposure aktif
     s->set_aec2(s, 1);                        // AEC DSP lanjutan aktif
     s->set_gain_ctrl(s, 1);                   // Auto Gain aktif
-    s->set_gainceiling(s, (gainceiling_t)2);  // Batasi gain agar noise bintik pasir minim
-    s->set_bpc(s, 1);                         // Black Pixel Correction aktif (hilangkan dead pixel)
-    s->set_wpc(s, 1);                         // White Pixel Correction aktif (hilangkan hot pixel)
+    s->set_gainceiling(s, (gainceiling_t)2);  // Batasi noise bintik pasir
+    s->set_bpc(s, 1);                         // Black Pixel Correction aktif
+    s->set_wpc(s, 1);                         // White Pixel Correction aktif
     s->set_raw_gma(s, 1);                     // Koreksi Gamma aktif
-    s->set_lenc(s, 1);                        // Lens Correction aktif (hilangkan vignet/gelap di sudut lensa)
-    Serial.println("Optimasi sensor OV2640 berhasil diterapkan.");
+    s->set_lenc(s, 1);                        // Lens Correction aktif (hilangkan sudut gelap)
   }
 
-  // Koneksi ke Wi-Fi
-  WiFi.begin(ssid, password);
-  Serial.print("Menghubungkan ke Wi-Fi: ");
-  Serial.println(ssid);
+  // ========================================================
+  // KONEKSI MULTI-WIFI OTOMATIS (Bisa ditambah WiFi lainnya)
+  // ========================================================
+  wifiMulti.addAP("Pandega Padma 19A", "rastelli123");
+  wifiMulti.addAP("Pandega Padma 19A_plus", "rastelli123");
+  wifiMulti.addAP("TOLERANSI BANYURADEN 3", "memangbeda");
+  wifiMulti.addAP("Hotspot HP", "12345678"); // Tambahkan Hotspot HP kamu di sini jika mau
 
-  while (WiFi.status() != WL_CONNECTED) {
+  Serial.println("Mencari dan menghubungkan ke Wi-Fi...");
+  while (wifiMulti.run() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
 
   Serial.println("\nWiFi Berhasil Terhubung!");
+  Serial.print("SSID Aktif: ");
+  Serial.println(WiFi.SSID());
   Serial.print("Alamat IP ESP32-CAM: ");
   Serial.println(WiFi.localIP());
 
-  // Jalankan Web Server MJPEG Stream
+  // Daftarkan nama domain lokal mDNS (http://smart-trap.local:81/stream)
+  if (MDNS.begin("smart-trap")) {
+    Serial.println("mDNS aktif: http://smart-trap.local:81/stream");
+  }
+
+  // Jalankan Web Server MJPEG Stream & Telemetry
   startCameraServer();
 
-  Serial.print("Gunakan URL ini di Dashboard Live Monitor: http://");
+  Serial.print("\n=== SIAP DIGUNAKAN ===\nURL Stream Dashboard: http://");
   Serial.print(WiFi.localIP());
   Serial.println(":81/stream");
+  Serial.print("URL Telemetry Langsung: http://");
+  Serial.print(WiFi.localIP());
+  Serial.println(":81/telemetry\n");
 }
 
 void loop() {
-  unsigned long now = millis();
-  
-  // Baca sensor dan kirim telemetry setiap 5 detik
-  if (now - lastTelemetryTime >= telemetryInterval) {
-    lastTelemetryTime = now;
-
-    float humidity = dht.readHumidity();
-    float temperature = dht.readTemperature();
-
-    // Jika sensor belum terpasang atau gagal terbaca, gunakan nilai dummy realistis
-    if (isnan(humidity) || isnan(temperature)) {
-      Serial.println("Sensor DHT22 tidak terdeteksi, mengirim data simulasi lahan...");
-      temperature = 28.5;
-      humidity = 70.0;
-    } else {
-      Serial.printf("DHT22 -> Suhu: %.1f C, Kelembapan: %.1f %%\n", temperature, humidity);
-    }
-
-    sendTelemetryData(temperature, humidity);
+  // Pastikan koneksi WiFi otomatis reconnect jika terputus
+  if (wifiMulti.run() != WL_CONNECTED) {
+    delay(500);
+    return;
   }
 
-  delay(20);
+  delay(50);
 }

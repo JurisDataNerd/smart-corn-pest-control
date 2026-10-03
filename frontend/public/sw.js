@@ -1,4 +1,4 @@
-const CACHE_NAME = 'smart-trap-v1';
+const CACHE_NAME = 'smart-trap-v2';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -29,20 +29,45 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  // Hanya proses request GET
   if (event.request.method !== 'GET') return;
-  if (event.request.url.includes('/api/')) return;
+
+  const url = new URL(event.request.url);
+
+  // JANGAN cegat request ke IP ESP32, port berbeda, atau cross-origin
+  if (url.origin !== self.location.origin) return;
+
+  // JANGAN cegat request backend API
+  if (url.pathname.startsWith('/api/')) return;
+
+  // JANGAN cegat internal Vite dev server files
+  if (url.pathname.includes('/@vite/') || url.pathname.includes('/@fs/') || url.pathname.includes('/@id/')) return;
 
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
       if (cachedResponse) {
-        fetch(event.request).then((networkResponse) => {
-          if (networkResponse && networkResponse.status === 200) {
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, networkResponse));
-          }
-        }).catch(() => {});
+        // Stale-while-revalidate untuk aset lokal
+        fetch(event.request)
+          .then((networkResponse) => {
+            if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
+              caches.open(CACHE_NAME).then((cache) => cache.put(event.request, networkResponse.clone()));
+            }
+          })
+          .catch(() => {});
         return cachedResponse;
       }
-      return fetch(event.request);
+
+      // Ambil dari jaringan dengan penanganan kegagalan aman (mencegah Uncaught TypeError: Failed to fetch)
+      return fetch(event.request).catch((err) => {
+        if (event.request.mode === 'navigate') {
+          return caches.match('/index.html');
+        }
+        return new Response('Network error occurred', {
+          status: 503,
+          statusText: 'Service Unavailable',
+          headers: new Headers({ 'Content-Type': 'text/plain' })
+        });
+      });
     })
   );
 });

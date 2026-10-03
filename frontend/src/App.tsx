@@ -1,13 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { SidebarNav, NavTab } from './components/SidebarNav';
-import { DashboardView } from './components/DashboardView';
 import { LiveMonitorView } from './components/LiveMonitorView';
 import { ImageUploadView } from './components/ImageUploadView';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { requestNotificationPermission } from './services/notificationService';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
+  const [activeTab, setActiveTab] = useState<NavTab>('monitor');
   const [backendConnected, setBackendConnected] = useState<boolean>(false);
 
   // Minta izin push notification langsung saat pertama kali pengguna masuk
@@ -77,12 +76,10 @@ export function App() {
 
   const getPageTitle = () => {
     switch (activeTab) {
-      case 'dashboard':
-        return 'Dashboard Lahan Jagung';
-      case 'upload':
-        return 'Upload Foto Hama';
       case 'monitor':
-        return 'Live Monitor (ESP32-CAM)';
+        return 'Live Monitor Kamera & Sensor (ESP32)';
+      case 'upload':
+        return 'Deteksi Foto Hama Saat Ini';
     }
   };
 
@@ -111,9 +108,8 @@ export function App() {
 
         {/* Dynamic View Body */}
         <main className="flex-1 max-w-5xl w-full mx-auto px-3.5 sm:px-6 py-4 sm:py-6">
-          {activeTab === 'dashboard' && <DashboardView />}
-          {activeTab === 'upload' && <ImageUploadView />}
           {activeTab === 'monitor' && <LiveMonitorView />}
+          {activeTab === 'upload' && <ImageUploadView />}
         </main>
 
         {/* Footer Sederhana */}

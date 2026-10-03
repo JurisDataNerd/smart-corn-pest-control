@@ -69,3 +69,19 @@ export async function fetchLatestTelemetry(): Promise<TelemetryData> {
   if (!res.ok) throw new Error('Failed to fetch telemetry');
   return res.json();
 }
+
+export async function fetchDeviceTelemetry(deviceUrl?: string): Promise<TelemetryData> {
+  const url = deviceUrl
+    ? `${API_BASE}/telemetry/device?device_url=${encodeURIComponent(deviceUrl)}`
+    : `${API_BASE}/telemetry/latest`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Failed to fetch device telemetry');
+  return res.json();
+}
+
+export async function toggleDeviceFlash(deviceUrl: string, state: 'on' | 'off'): Promise<{ flash: string }> {
+  const url = `${API_BASE}/telemetry/flash?device_url=${encodeURIComponent(deviceUrl)}&state=${state}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Failed to toggle flash');
+  return res.json();
+}

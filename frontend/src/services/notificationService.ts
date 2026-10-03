@@ -101,7 +101,8 @@ export function notifyPestDetected(pestName: string, count: number = 1) {
 /**
  * Notifikasi otomatis saat pembacaan sensor DHT22 (Suhu / Kelembapan) di luar batas ideal
  */
-export function notifyDHT22Alert(temperature: number, humidity?: number) {
+export function notifyDHT22Alert(temperature: number | null | undefined, humidity?: number | null) {
+  if (temperature === null || temperature === undefined) return;
   const now = Date.now();
   // Cooldown 45 detik untuk notifikasi sensor
   if (now - lastTempNotificationTime < 45000) return;

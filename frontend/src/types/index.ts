@@ -80,9 +80,9 @@ export interface TrapAnalytics {
 }
 
 export interface TelemetryData {
-  temperature: number;
-  humidity: number;
+  temperature: number | null;
+  humidity: number | null;
   trap_id?: string;
-  updated_at?: string;
+  updated_at?: string | null;
   status?: string;
 }

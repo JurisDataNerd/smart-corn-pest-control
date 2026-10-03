@@ -1,20 +1,24 @@
 /*
- * Firmware ESP32-CAM + Sensor DHT22 untuk Smart Trap Lahan Jagung (Syngenta)
- * Board Target: AI Thinker ESP32-CAM
- * 
- * Fitur Fleksibel:
- * 1. MJPEG Camera Video Stream di port 81 (URL: http://<IP_ESP32>:81/stream)
- * 2. Direct Sensor Telemetry HTTP Endpoint di port 81 (URL: http://<IP_ESP32>:81/telemetry)
- * 3. Multi-WiFi Support (otomatis menyambung ke WiFi mana pun yang aktif)
- * 4. mDNS Support (bisa diakses via http://smart-trap.local:81/stream)
- * 5. Membaca Sensor Suhu & Kelembapan DHT22 (Pin GPIO 13)
+ * ============================================================
+ *  FIRMWARE ESP32-CAM + DHT22 - Smart Trap Lahan Jagung
+ *  Board: AI Thinker ESP32-CAM
+ *  ESP32 Core: 2.0.17 (WAJIB!)
+ * ============================================================
+ *  
+ *  FITUR:
+ *  - Hotspot mandiri: SSID "SmartTrap-CAM", pass "12345678"
+ *  - IP ESP32 SELALU 192.168.4.1
+ *  - Live stream MJPEG : http://192.168.4.1:81/stream
+ *  - Telemetry DHT22   : http://192.168.4.1:81/telemetry
+ *  - LED flash BAWAAN (GPIO 4) NYALA TERUS untuk pencahayaan
+ *  - Kontrol flash via : http://192.168.4.1:81/flash?state=on/off
+ *  - Info page         : http://192.168.4.1:81/
+ * ============================================================
  */
 
 #include "esp_camera.h"
 #include <WiFi.h>
-#include <WiFiMulti.h>
 #include <ESPmDNS.h>
-#include <HTTPClient.h>
 #include "esp_timer.h"
 #include "img_converters.h"
 #include "fb_gfx.h"
@@ -23,25 +27,36 @@
 #include "esp_http_server.h"
 #include "DHT.h"
 
-// Objek Multi-WiFi
-WiFiMulti wifiMulti;
+// ==========================================
+// 1. KONFIGURASI HOTSPOT ESP32
+// ==========================================
+const char* AP_SSID     = "SmartTrap-CAM";
+const char* AP_PASSWORD = "12345678";
+const int   AP_CHANNEL  = 1;
+const int   AP_MAX_CONN = 4;
 
 // ==========================================
-// 1. PENGATURAN SENSOR DHT22
+// 2. KONFIGURASI LED FLASH BAWAAN
 // ==========================================
-#define DHTPIN 13       // Hubungkan pin DATA DHT22 ke GPIO 13 ESP32-CAM
-#define DHTTYPE DHT22   // Sensor DHT 22 (AM2302)
+#define FLASH_LED_PIN       4       // LED flash built-in AI-Thinker
+#define FLASH_ALWAYS_ON     true    // true = nyala terus untuk pencahayaan
+#define FLASH_STARTUP_BLINK 2       // Kedip singkat tanda boot
+
+// ==========================================
+// 3. KONFIGURASI SENSOR DHT22
+// ==========================================
+#define DHTPIN  13
+#define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
 // ==========================================
-// 2. DEFINISI PIN AI-THINKER ESP32-CAM
+// 4. PIN AI-THINKER ESP32-CAM (ANGKA LANGSUNG)
 // ==========================================
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
 #define SIOD_GPIO_NUM     26
 #define SIOC_GPIO_NUM     27
-
 #define Y9_GPIO_NUM       35
 #define Y8_GPIO_NUM       34
 #define Y7_GPIO_NUM       39
@@ -54,7 +69,6 @@ DHT dht(DHTPIN, DHTTYPE);
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-// Server Stream & Telemetry
 httpd_handle_t stream_httpd = NULL;
 
 #define PART_BOUNDARY "123456789000000000000987654321"
@@ -62,7 +76,34 @@ static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" 
 static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
-// Handler Video Stream MJPEG (/stream)
+// ==========================================
+// 5. FUNGSI: SETUP LED FLASH PENCAHAYAAN
+// ==========================================
+void setupFlashLed() {
+  pinMode(FLASH_LED_PIN, OUTPUT);
+
+  // Blink singkat tanda boot
+  if (FLASH_STARTUP_BLINK > 0) {
+    for (int i = 0; i < FLASH_STARTUP_BLINK; i++) {
+      digitalWrite(FLASH_LED_PIN, HIGH); delay(100);
+      digitalWrite(FLASH_LED_PIN, LOW);  delay(100);
+    }
+  }
+
+  // Mode pencahayaan: nyala terus
+  if (FLASH_ALWAYS_ON) {
+    digitalWrite(FLASH_LED_PIN, HIGH);
+    Serial.println("[LED] Flash bawaan ON TERUS (pencahayaan kamera)");
+    Serial.println("[LED] Konsumsi arus ekstra: ~200mA");
+  } else {
+    digitalWrite(FLASH_LED_PIN, LOW);
+    Serial.println("[LED] Flash OFF");
+  }
+}
+
+// ==========================================
+// 6. HANDLER: STREAM KAMERA MJPEG (OPTIMIZED SMOOTH & LOW LATENCY)
+// ==========================================
 static esp_err_t stream_handler(httpd_req_t *req) {
   camera_fb_t * fb = NULL;
   esp_err_t res = ESP_OK;
@@ -73,13 +114,12 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
   if (res != ESP_OK) return res;
 
-  // Izinkan CORS agar frontend web laptop mana pun bisa mengakses gambar langsung
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
 
   while (true) {
     fb = esp_camera_fb_get();
     if (!fb) {
-      Serial.println("Gagal mengambil frame kamera");
+      Serial.println("[CAM] Gagal ambil frame");
       res = ESP_FAIL;
     } else {
       _jpg_buf_len = fb->len;
@@ -105,173 +145,287 @@ static esp_err_t stream_handler(httpd_req_t *req) {
       _jpg_buf = NULL;
     }
     if (res != ESP_OK) break;
+
+    // Pacing throttle: Beri jeda 12-15ms agar WiFi LwIP stack sempat flush packet
+    // Mencegah TCP buffer overflow dan menghilangkan lag akumulatif/patah-patah!
+    vTaskDelay(pdMS_TO_TICKS(15));
   }
   return res;
 }
 
-// Handler Langsung Data Sensor DHT22 (/telemetry)
-static esp_err_t telemetry_handler(httpd_req_t *req) {
-  float humidity = dht.readHumidity();
-  float temperature = dht.readTemperature();
+// ==========================================
+// 7. HANDLER: TELEMETRY DHT22 (CACHED, NON-BLOCKING)
+// ==========================================
+static unsigned long lastDhtReadTime = 0;
+static float cachedTemperature = 28.5;
+static float cachedHumidity = 70.0;
 
-  // Fallback simulasi cerdas jika sensor fisik belum tertancap di GPIO 13
-  if (isnan(humidity) || isnan(temperature)) {
-    temperature = 28.5;
-    humidity = 70.0;
+static esp_err_t telemetry_handler(httpd_req_t *req) {
+  // Hanya baca sensor fisik tiap 2.5 detik agar CPU tidak tersendat saat streaming kamera
+  if (millis() - lastDhtReadTime > 2500 || lastDhtReadTime == 0) {
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+
+    if (!isnan(h) && !isnan(t)) {
+      cachedTemperature = t;
+      cachedHumidity = h;
+    }
+    lastDhtReadTime = millis();
   }
 
-  char json[160];
+  char json[200];
   snprintf(json, sizeof(json),
-    "{\"temperature\":%.1f,\"humidity\":%.1f,\"trap_id\":\"LAHAN-01\",\"status\":\"active\"}",
-    temperature, humidity);
+    "{\"temperature\":%.1f,\"humidity\":%.1f,\"trap_id\":\"LAHAN-01\","
+    "\"status\":\"active\",\"flash\":\"%s\",\"clients\":%d}",
+    cachedTemperature, cachedHumidity,
+    digitalRead(FLASH_LED_PIN) ? "on" : "off",
+    WiFi.softAPgetStationNum());
 
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   return httpd_resp_send(req, json, strlen(json));
 }
 
+// ==========================================
+// 8. HANDLER: KONTROL LED FLASH
+// ==========================================
+static esp_err_t flash_handler(httpd_req_t *req) {
+  char state[8] = "";
+
+  size_t len = httpd_req_get_url_query_len(req) + 1;
+  if (len > 1) {
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+      httpd_query_key_value(query, "state", state, sizeof(state));
+      if (strcmp(state, "on") == 0) {
+        digitalWrite(FLASH_LED_PIN, HIGH);
+        Serial.println("[LED] Flash ON (via HTTP)");
+      } else if (strcmp(state, "off") == 0) {
+        digitalWrite(FLASH_LED_PIN, LOW);
+        Serial.println("[LED] Flash OFF (via HTTP)");
+      }
+    }
+  }
+
+  char resp[48];
+  snprintf(resp, sizeof(resp),
+    "{\"flash\":\"%s\"}",
+    digitalRead(FLASH_LED_PIN) ? "on" : "off");
+
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  return httpd_resp_send(req, resp, strlen(resp));
+}
+
+// ==========================================
+// 9. HANDLER: ROOT INFO PAGE
+// ==========================================
+static esp_err_t root_handler(httpd_req_t *req) {
+  char html[700];
+  snprintf(html, sizeof(html),
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Smart Trap AI</title></head>"
+    "<body style='font-family:Arial;background:#111;color:#0f0;padding:20px'>"
+    "<h1>Smart Trap AI - Syngenta</h1>"
+    "<p><b>Status:</b> ONLINE (Hotspot Mode)</p>"
+    "<p><b>IP:</b> %s</p>"
+    "<p><b>SSID:</b> %s</p>"
+    "<p><b>Client Connect:</b> %d</p>"
+    "<p><b>Flash LED:</b> %s</p>"
+    "<hr>"
+    "<p>Live Stream: <a href='/stream' style='color:#0f0'>/stream</a></p>"
+    "<p>Telemetry  : <a href='/telemetry' style='color:#0f0'>/telemetry</a></p>"
+    "<p>Flash ON   : <a href='/flash?state=on' style='color:#0f0'>/flash?state=on</a></p>"
+    "<p>Flash OFF  : <a href='/flash?state=off' style='color:#0f0'>/flash?state=off</a></p>"
+    "</body></html>",
+    WiFi.softAPIP().toString().c_str(),
+    AP_SSID,
+    WiFi.softAPgetStationNum(),
+    digitalRead(FLASH_LED_PIN) ? "ON" : "OFF");
+
+  httpd_resp_set_type(req, "text/html");
+  return httpd_resp_send(req, html, strlen(html));
+}
+
+// ==========================================
+// 10. START HTTP SERVER
+// ==========================================
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 81;
-  config.ctrl_port = 32769;
+  config.ctrl_port   = 32769;
+  config.max_uri_handlers = 8;
 
-  httpd_uri_t stream_uri = {
-    .uri       = "/stream",
-    .method    = HTTP_GET,
-    .handler   = stream_handler,
-    .user_ctx  = NULL
+  httpd_uri_t root_uri = {
+    .uri = "/", .method = HTTP_GET,
+    .handler = root_handler, .user_ctx = NULL
   };
-
+  httpd_uri_t stream_uri = {
+    .uri = "/stream", .method = HTTP_GET,
+    .handler = stream_handler, .user_ctx = NULL
+  };
   httpd_uri_t telemetry_uri = {
-    .uri       = "/telemetry",
-    .method    = HTTP_GET,
-    .handler   = telemetry_handler,
-    .user_ctx  = NULL
+    .uri = "/telemetry", .method = HTTP_GET,
+    .handler = telemetry_handler, .user_ctx = NULL
+  };
+  httpd_uri_t flash_uri = {
+    .uri = "/flash", .method = HTTP_GET,
+    .handler = flash_handler, .user_ctx = NULL
   };
 
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(stream_httpd, &root_uri);
     httpd_register_uri_handler(stream_httpd, &stream_uri);
     httpd_register_uri_handler(stream_httpd, &telemetry_uri);
-    Serial.println("Server Stream & Telemetry aktif di port 81");
+    httpd_register_uri_handler(stream_httpd, &flash_uri);
+    Serial.println("[HTTP] Server aktif di port 81");
   }
 }
 
+// ==========================================
+// 11. SETUP HOTSPOT MANDIRI
+// ==========================================
+void setupHotspot() {
+  WiFi.mode(WIFI_AP);
+
+  IPAddress local_ip(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
+  WiFi.softAPConfig(local_ip, gateway, subnet);
+
+  bool ok = WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL, false, AP_MAX_CONN);
+
+  if (ok) {
+    Serial.println("\n==================================================");
+    Serial.println(" HOTSPOT ESP32 AKTIF!");
+    Serial.println("==================================================");
+    Serial.printf (" SSID     : %s\n", AP_SSID);
+    Serial.printf (" Password : %s\n", AP_PASSWORD);
+    Serial.printf (" IP ESP32 : %s\n", WiFi.softAPIP().toString().c_str());
+    Serial.println("--------------------------------------------------");
+    Serial.println(" 1. Connect HP/Laptop ke WiFi di atas");
+    Serial.println(" 2. Buka: http://192.168.4.1:81/");
+    Serial.println(" 3. Stream:  http://192.168.4.1:81/stream");
+    Serial.println(" 4. Telemetry: http://192.168.4.1:81/telemetry");
+    Serial.println("==================================================\n");
+
+    if (MDNS.begin("smarttrap")) {
+      MDNS.addService("http", "tcp", 81);
+      Serial.println("[mDNS] http://smarttrap.local:81/stream");
+    }
+  } else {
+    Serial.println("[WiFi] Gagal start hotspot!");
+  }
+}
+
+// ==========================================
+// 12. SETUP UTAMA
+// ==========================================
 void setup() {
-  // Matikan brownout detector agar ESP32 tidak restart saat beban arus kamera naik
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
   Serial.begin(115200);
   Serial.setDebugOutput(false);
-  Serial.println("\n--- Memulai Inisialisasi ESP32-CAM Smart Trap (Fleksibel) ---");
+  Serial.println("\n==================================================");
+  Serial.println("  Smart Trap AI - ESP32-CAM + DHT22");
+  Serial.println("  Mode: HOTSPOT + LED Flash ON");
+  Serial.println("==================================================");
 
-  // Inisialisasi Sensor DHT22
+  // (1) Nyalakan LED flash bawaan untuk pencahayaan
+  setupFlashLed();
+
+  // (2) Init DHT22
   dht.begin();
+  delay(2000);
 
-  // Konfigurasi Kamera
+  // (3) Init Kamera
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
+  config.ledc_timer   = LEDC_TIMER_0;
+  config.pin_d0       = Y2_GPIO_NUM;
+  config.pin_d1       = Y3_GPIO_NUM;
+  config.pin_d2       = Y4_GPIO_NUM;
+  config.pin_d3       = Y5_GPIO_NUM;
+  config.pin_d4       = Y6_GPIO_NUM;
+  config.pin_d5       = Y7_GPIO_NUM;
+  config.pin_d6       = Y8_GPIO_NUM;
+  config.pin_d7       = Y9_GPIO_NUM;
+  config.pin_xclk     = XCLK_GPIO_NUM;
+  config.pin_pclk     = PCLK_GPIO_NUM;
+  config.pin_vsync    = VSYNC_GPIO_NUM;
+  config.pin_href     = HREF_GPIO_NUM;
   config.pin_sccb_sda = SIOD_GPIO_NUM;
   config.pin_sccb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
+  config.pin_pwdn     = PWDN_GPIO_NUM;
+  config.pin_reset    = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
-  // Resolusi frame & Kualitas JPEG Optimal
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_SVGA; // 800x600 (Jernih & tajam)
-    config.jpeg_quality = 10;          // Minim artifak kompresi
-    config.fb_count = 2;
+    config.frame_size   = FRAMESIZE_VGA;    // 640x480 (Smooth & rendah latensi untuk streaming WiFi)
+    config.jpeg_quality = 12;               // Kualitas seimbang (ukuran ~20-25 KB per frame)
+    config.fb_count     = 2;
+    Serial.println("[CAM] PSRAM terdeteksi - mode VGA 640x480 (Smooth)");
   } else {
-    config.frame_size = FRAMESIZE_SVGA;
-    config.jpeg_quality = 10;
-    config.fb_count = 1;
+    config.frame_size   = FRAMESIZE_VGA;    // 640x480
+    config.jpeg_quality = 15;
+    config.fb_count     = 1;
+    Serial.println("[CAM] Tanpa PSRAM - mode VGA 640x480");
   }
 
-  // Inisialisasi Driver Kamera
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Inisialisasi kamera gagal dengan kode error 0x%x\n", err);
-    return;
+    Serial.printf("[CAM] Init gagal: 0x%x\n", err);
+    return;   // LED tetap ON
   }
+  Serial.println("[CAM] Inisialisasi berhasil");
 
-  // ========================================================
-  // PENINGKATAN KUALITAS SENSOR OV2640 (Hardware Image Signal)
-  // ========================================================
+  // Setting sensor agar optimal dengan LED ON
   sensor_t * s = esp_camera_sensor_get();
   if (s != NULL) {
-    s->set_brightness(s, 1);                  // Sedikit lebih terang
-    s->set_contrast(s, 1);                    // Pertajam kontras batas objek
-    s->set_saturation(s, 1);                  // Warna lebih hidup
-    s->set_special_effect(s, 0);              // 0 = Normal
-    s->set_whitebal(s, 1);                    // Auto White Balance aktif
-    s->set_awb_gain(s, 1);                    // Auto White Balance Gain aktif
-    s->set_wb_mode(s, 0);                     // 0 = Auto WB
-    s->set_exposure_ctrl(s, 1);               // Auto Exposure aktif
-    s->set_aec2(s, 1);                        // AEC DSP lanjutan aktif
-    s->set_gain_ctrl(s, 1);                   // Auto Gain aktif
-    s->set_gainceiling(s, (gainceiling_t)2);  // Batasi noise bintik pasir
-    s->set_bpc(s, 1);                         // Black Pixel Correction aktif
-    s->set_wpc(s, 1);                         // White Pixel Correction aktif
-    s->set_raw_gma(s, 1);                     // Koreksi Gamma aktif
-    s->set_lenc(s, 1);                        // Lens Correction aktif (hilangkan sudut gelap)
+    s->set_brightness(s, 1);
+    s->set_contrast(s, 1);
+    s->set_saturation(s, 1);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_wb_mode(s, 2);         // 2=Cloudy, cocok untuk LED putih
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_gainceiling(s, (gainceiling_t)2);
+    s->set_bpc(s, 1);
+    s->set_wpc(s, 1);
+    s->set_lenc(s, 1);
   }
 
-  // ========================================================
-  // KONEKSI MULTI-WIFI OTOMATIS (Bisa ditambah WiFi lainnya)
-  // ========================================================
-  wifiMulti.addAP("Pandega Padma 19A", "rastelli123");
-  wifiMulti.addAP("Pandega Padma 19A_plus", "rastelli123");
-  wifiMulti.addAP("TOLERANSI BANYURADEN 3", "memangbeda");
-  wifiMulti.addAP("Hotspot HP", "12345678"); // Tambahkan Hotspot HP kamu di sini jika mau
+  // (4) Setup Hotspot
+  setupHotspot();
 
-  Serial.println("Mencari dan menghubungkan ke Wi-Fi...");
-  while (wifiMulti.run() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("\nWiFi Berhasil Terhubung!");
-  Serial.print("SSID Aktif: ");
-  Serial.println(WiFi.SSID());
-  Serial.print("Alamat IP ESP32-CAM: ");
-  Serial.println(WiFi.localIP());
-
-  // Daftarkan nama domain lokal mDNS (http://smart-trap.local:81/stream)
-  if (MDNS.begin("smart-trap")) {
-    Serial.println("mDNS aktif: http://smart-trap.local:81/stream");
-  }
-
-  // Jalankan Web Server MJPEG Stream & Telemetry
+  // (5) Start HTTP Server
   startCameraServer();
 
-  Serial.print("\n=== SIAP DIGUNAKAN ===\nURL Stream Dashboard: http://");
-  Serial.print(WiFi.localIP());
-  Serial.println(":81/stream");
-  Serial.print("URL Telemetry Langsung: http://");
-  Serial.print(WiFi.localIP());
-  Serial.println(":81/telemetry\n");
+  Serial.println("\n==================================================");
+  Serial.println(" SISTEM SIAP DIPAKAI!");
+  Serial.println(" LED Flash : ON TERUS (pencahayaan)");
+  Serial.println(" Hotspot   : SmartTrap-CAM");
+  Serial.println(" Stream    : http://192.168.4.1:81/stream");
+  Serial.println(" Telemetry : http://192.168.4.1:81/telemetry");
+  Serial.println("==================================================\n");
 }
 
-void loop() {
-  // Pastikan koneksi WiFi otomatis reconnect jika terputus
-  if (wifiMulti.run() != WL_CONNECTED) {
-    delay(500);
-    return;
-  }
+// ==========================================
+// 13. LOOP
+// ==========================================
+unsigned long lastStatus = 0;
 
-  delay(50);
+void loop() {
+  if (millis() - lastStatus > 10000) {
+    lastStatus = millis();
+    Serial.printf("[STATUS] Clients: %d | IP: %s | Flash: %s | FreeHeap: %d\n",
+                  WiFi.softAPgetStationNum(),
+                  WiFi.softAPIP().toString().c_str(),
+                  digitalRead(FLASH_LED_PIN) ? "ON" : "OFF",
+                  ESP.getFreeHeap());
+  }
+  delay(1000);
 }

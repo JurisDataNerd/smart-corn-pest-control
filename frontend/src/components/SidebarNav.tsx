@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import {
-  LayoutDashboard,
   UploadCloud,
   Cctv,
   Sun,
@@ -11,7 +10,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 
-export type NavTab = 'dashboard' | 'upload' | 'monitor';
+export type NavTab = 'monitor' | 'upload';
 
 interface SidebarNavProps {
   activeTab: NavTab;
@@ -32,19 +31,14 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
 
   const navItems = [
     {
-      id: 'dashboard' as const,
-      label: 'Dashboard',
-      icon: LayoutDashboard,
+      id: 'monitor' as const,
+      label: 'Live Monitor (ESP32)',
+      icon: Cctv,
     },
     {
       id: 'upload' as const,
       label: 'Upload Foto Hama',
       icon: UploadCloud,
-    },
-    {
-      id: 'monitor' as const,
-      label: 'Live Monitor',
-      icon: Cctv,
     },
   ];
 

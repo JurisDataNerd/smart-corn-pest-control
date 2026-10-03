@@ -18,5 +18,8 @@
     "test:backend": "bash -c 'PYTHONPATH=. ./backend/venv/bin/python backend/tests/test_backend.py'",
     "train:yolo": "bash -c 'PYTHONPATH=. ./backend/venv/bin/python backend/train_yolo.py'",
     "install:all": "bun install && (cd backend && ./venv/bin/pip install -r requirements.txt)"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
   }
 }

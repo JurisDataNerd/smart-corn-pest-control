@@ -37,9 +37,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static file directory for uploaded/annotated trap images
+# Mount static file directory for uploaded/annotated trap images & references
 settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(settings.UPLOAD_DIR)), name="uploads")
+
+if settings.REFERENCES_DIR.exists():
+    app.mount("/references", StaticFiles(directory=str(settings.REFERENCES_DIR)), name="references")
 
 # Include API v1 Router
 app.include_router(api_router, prefix=settings.API_V1_STR)

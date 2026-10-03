@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     UPLOAD_DIR: Path = BASE_DIR / "uploads"
     WEIGHTS_DIR: Path = BASE_DIR / "weights"
     DATASET_DIR: Path = BASE_DIR / "dataset"
+    STATIC_DIR: Path = BASE_DIR / "app" / "static"
+    REFERENCES_DIR: Path = BASE_DIR / "app" / "static" / "references"
     
     # AI Vision Settings
     CONFIDENCE_THRESHOLD: float = 0.40

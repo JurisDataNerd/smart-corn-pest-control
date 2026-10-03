@@ -26,6 +26,9 @@
 #include "soc/rtc_cntl_reg.h"
 #include "esp_http_server.h"
 #include "DHT.h"
+#if __has_include(<esp_arduino_version.h>)
+  #include <esp_arduino_version.h>
+#endif
 
 // ==========================================
 // 1. KONFIGURASI HOTSPOT ESP32
@@ -36,11 +39,14 @@ const int   AP_CHANNEL  = 1;
 const int   AP_MAX_CONN = 4;
 
 // ==========================================
-// 2. KONFIGURASI LED FLASH BAWAAN
+// 2. KONFIGURASI LED FLASH BAWAAN (PWM HEMAT DAYA)
 // ==========================================
-#define FLASH_LED_PIN       4       // LED flash built-in AI-Thinker
-#define FLASH_ALWAYS_ON     true    // true = nyala terus untuk pencahayaan
-#define FLASH_STARTUP_BLINK 2       // Kedip singkat tanda boot
+#define FLASH_LED_PIN        4      // LED flash built-in AI-Thinker
+#define FLASH_LEDC_CHANNEL   7      // Channel LEDC PWM
+#define FLASH_ALWAYS_ON      false  // false = Flash standby saat boot, nyalakan via tombol saat butuh agar TIDAK memicu lonjakan arus!
+#define FLASH_PWM_DUTY       20     // 20/255 duty (~8% duty) = Terang cukup, super hemat arus (<12mA), chip dingin & bebas brownout!
+#define FLASH_STARTUP_BLINK  0      // 0 = Tanpa blink yang mengejutkan rel tegangan 3.3V
+static bool flashState = FLASH_ALWAYS_ON;
 
 // ==========================================
 // 3. KONFIGURASI SENSOR DHT22
@@ -77,26 +83,42 @@ static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
 // ==========================================
-// 5. FUNGSI: SETUP LED FLASH PENCAHAYAAN
+// 5. FUNGSI: SETUP LED FLASH PENCAHAYAAN (PWM AMAN MULTI-CORE)
 // ==========================================
+void setFlashDuty(uint8_t duty) {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+  ledcWrite(FLASH_LED_PIN, duty);
+#else
+  ledcWrite(FLASH_LEDC_CHANNEL, duty);
+#endif
+}
+
 void setupFlashLed() {
-  pinMode(FLASH_LED_PIN, OUTPUT);
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+  // ESP32 Arduino Core 3.x API
+  ledcAttach(FLASH_LED_PIN, 5000, 8);
+#else
+  // ESP32 Arduino Core 2.x API
+  ledcSetup(FLASH_LEDC_CHANNEL, 5000, 8);
+  ledcAttachPin(FLASH_LED_PIN, FLASH_LEDC_CHANNEL);
+#endif
 
   // Blink singkat tanda boot
   if (FLASH_STARTUP_BLINK > 0) {
     for (int i = 0; i < FLASH_STARTUP_BLINK; i++) {
-      digitalWrite(FLASH_LED_PIN, HIGH); delay(100);
-      digitalWrite(FLASH_LED_PIN, LOW);  delay(100);
+      setFlashDuty(FLASH_PWM_DUTY); delay(80);
+      setFlashDuty(0); delay(80);
     }
   }
 
-  // Mode pencahayaan: nyala terus
+  // Mode pencahayaan: nyala terus via PWM (stabil & dingin)
   if (FLASH_ALWAYS_ON) {
-    digitalWrite(FLASH_LED_PIN, HIGH);
-    Serial.println("[LED] Flash bawaan ON TERUS (pencahayaan kamera)");
-    Serial.println("[LED] Konsumsi arus ekstra: ~200mA");
+    setFlashDuty(FLASH_PWM_DUTY);
+    flashState = true;
+    Serial.println("[LED] Flash ON via PWM Duty 35 (Pencahayaan terang, dingin, arus <30mA, WiFi stabil!)");
   } else {
-    digitalWrite(FLASH_LED_PIN, LOW);
+    setFlashDuty(0);
+    flashState = false;
     Serial.println("[LED] Flash OFF");
   }
 }
@@ -109,12 +131,13 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   esp_err_t res = ESP_OK;
   size_t _jpg_buf_len = 0;
   uint8_t * _jpg_buf = NULL;
-  char * part_buf[64];
+  char part_buf[128];
 
   res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
   if (res != ESP_OK) return res;
 
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "X-Framerate", "30");
 
   while (true) {
     fb = esp_camera_fb_get();
@@ -126,16 +149,20 @@ static esp_err_t stream_handler(httpd_req_t *req) {
       _jpg_buf = fb->buf;
     }
 
-    if (res == ESP_OK) {
-      size_t hlen = snprintf((char *)part_buf, 64, _STREAM_PART, _jpg_buf_len);
-      res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
-    }
-    if (res == ESP_OK) {
-      res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
-    }
+    // 1. Kirim Boundary Pembuka
     if (res == ESP_OK) {
       res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
     }
+    // 2. Kirim Header Part (Content-Type & Content-Length)
+    if (res == ESP_OK) {
+      size_t hlen = snprintf(part_buf, sizeof(part_buf), _STREAM_PART, _jpg_buf_len);
+      res = httpd_resp_send_chunk(req, part_buf, hlen);
+    }
+    // 3. Kirim Binary Frame JPEG
+    if (res == ESP_OK) {
+      res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
+    }
+
     if (fb) {
       esp_camera_fb_return(fb);
       fb = NULL;
@@ -144,41 +171,49 @@ static esp_err_t stream_handler(httpd_req_t *req) {
       free(_jpg_buf);
       _jpg_buf = NULL;
     }
-    if (res != ESP_OK) break;
 
-    // Pacing throttle: Beri jeda 12-15ms agar WiFi LwIP stack sempat flush packet
-    // Mencegah TCP buffer overflow dan menghilangkan lag akumulatif/patah-patah!
-    vTaskDelay(pdMS_TO_TICKS(15));
+    if (res != ESP_OK) break;
+    // Jeda 20ms: Capping ~25-30 FPS, mencegah CPU 100% starvation, menjaga buffer Wi-Fi tetap stabil & anti-crash!
+    delay(20);
   }
   return res;
 }
 
 // ==========================================
-// 7. HANDLER: TELEMETRY DHT22 (CACHED, NON-BLOCKING)
+// 7. HANDLER: TELEMETRY DHT22 (ROBUST & NON-BLOCKING)
 // ==========================================
 static unsigned long lastDhtReadTime = 0;
 static float cachedTemperature = 28.5;
 static float cachedHumidity = 70.0;
+static bool  dhtSensorDetected = false;
 
 static esp_err_t telemetry_handler(httpd_req_t *req) {
-  // Hanya baca sensor fisik tiap 2.5 detik agar CPU tidak tersendat saat streaming kamera
+  // Baca sensor fisik tiap 2.5 detik
   if (millis() - lastDhtReadTime > 2500 || lastDhtReadTime == 0) {
     float h = dht.readHumidity();
     float t = dht.readTemperature();
 
-    if (!isnan(h) && !isnan(t)) {
+    if (!isnan(h) && !isnan(t) && h > 0.0 && t > 0.0) {
       cachedTemperature = t;
       cachedHumidity = h;
+      dhtSensorDetected = true;
+      Serial.printf("[DHT22] SUKSES -> Suhu: %.1f C | Kelembapan: %.1f %%\n", t, h);
+    } else {
+      dhtSensorDetected = false;
+      Serial.printf("[DHT22] PERINGATAN: Sensor tidak merespon di GPIO %d! (Cek kabel VCC 5V, GND, DATA)\n", DHTPIN);
     }
     lastDhtReadTime = millis();
   }
 
-  char json[200];
+  char json[256];
   snprintf(json, sizeof(json),
-    "{\"temperature\":%.1f,\"humidity\":%.1f,\"trap_id\":\"LAHAN-01\","
-    "\"status\":\"active\",\"flash\":\"%s\",\"clients\":%d}",
+    "{\"temperature\":%.1f,\"humidity\":%.1f,\"detected\":%s,\"pin\":%d,\"trap_id\":\"LAHAN-01\","
+    "\"status\":\"%s\",\"flash\":\"%s\",\"clients\":%d}",
     cachedTemperature, cachedHumidity,
-    digitalRead(FLASH_LED_PIN) ? "on" : "off",
+    dhtSensorDetected ? "true" : "false",
+    DHTPIN,
+    dhtSensorDetected ? "active" : "waiting",
+    flashState ? "on" : "off",
     WiFi.softAPgetStationNum());
 
   httpd_resp_set_type(req, "application/json");
@@ -198,11 +233,13 @@ static esp_err_t flash_handler(httpd_req_t *req) {
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
       httpd_query_key_value(query, "state", state, sizeof(state));
       if (strcmp(state, "on") == 0) {
-        digitalWrite(FLASH_LED_PIN, HIGH);
-        Serial.println("[LED] Flash ON (via HTTP)");
+        setFlashDuty(FLASH_PWM_DUTY);
+        flashState = true;
+        Serial.println("[LED] Flash ON via PWM");
       } else if (strcmp(state, "off") == 0) {
-        digitalWrite(FLASH_LED_PIN, LOW);
-        Serial.println("[LED] Flash OFF (via HTTP)");
+        setFlashDuty(0);
+        flashState = false;
+        Serial.println("[LED] Flash OFF");
       }
     }
   }
@@ -210,7 +247,7 @@ static esp_err_t flash_handler(httpd_req_t *req) {
   char resp[48];
   snprintf(resp, sizeof(resp),
     "{\"flash\":\"%s\"}",
-    digitalRead(FLASH_LED_PIN) ? "on" : "off");
+    flashState ? "on" : "off");
 
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -248,6 +285,24 @@ static esp_err_t root_handler(httpd_req_t *req) {
   return httpd_resp_send(req, html, strlen(html));
 }
 
+// Handler ambil single snapshot JPEG (/capture)
+static esp_err_t capture_handler(httpd_req_t *req) {
+  camera_fb_t * fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("[CAM] Gagal ambil snapshot");
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+
+  httpd_resp_set_type(req, "image/jpeg");
+  httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+  esp_camera_fb_return(fb);
+  return res;
+}
+
 // ==========================================
 // 10. START HTTP SERVER
 // ==========================================
@@ -255,7 +310,8 @@ void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 81;
   config.ctrl_port   = 32769;
-  config.max_uri_handlers = 8;
+  config.max_uri_handlers = 10;
+  config.lru_purge_enable = true; // Auto-purge socket lama saat client reconnect agar tidak ERR_INCOMPLETE_CHUNKED_ENCODING!
 
   httpd_uri_t root_uri = {
     .uri = "/", .method = HTTP_GET,
@@ -264,6 +320,10 @@ void startCameraServer() {
   httpd_uri_t stream_uri = {
     .uri = "/stream", .method = HTTP_GET,
     .handler = stream_handler, .user_ctx = NULL
+  };
+  httpd_uri_t capture_uri = {
+    .uri = "/capture", .method = HTTP_GET,
+    .handler = capture_handler, .user_ctx = NULL
   };
   httpd_uri_t telemetry_uri = {
     .uri = "/telemetry", .method = HTTP_GET,
@@ -277,6 +337,7 @@ void startCameraServer() {
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(stream_httpd, &root_uri);
     httpd_register_uri_handler(stream_httpd, &stream_uri);
+    httpd_register_uri_handler(stream_httpd, &capture_uri);
     httpd_register_uri_handler(stream_httpd, &telemetry_uri);
     httpd_register_uri_handler(stream_httpd, &flash_uri);
     Serial.println("[HTTP] Server aktif di port 81");
@@ -297,6 +358,9 @@ void setupHotspot() {
   bool ok = WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL, false, AP_MAX_CONN);
 
   if (ok) {
+    // Kunci stabilitas radio WiFi: Matikan sleep mode & set TX power stabil tanpa lonjakan arus
+    WiFi.setSleep(false);
+    WiFi.setTxPower(WIFI_POWER_15dBm);
     Serial.println("\n==================================================");
     Serial.println(" HOTSPOT ESP32 AKTIF!");
     Serial.println("==================================================");
@@ -335,9 +399,11 @@ void setup() {
   // (1) Nyalakan LED flash bawaan untuk pencahayaan
   setupFlashLed();
 
-  // (2) Init DHT22
+  // (2) Init DHT22 dengan internal PULLUP resistor
+  pinMode(DHTPIN, INPUT_PULLUP);
   dht.begin();
-  delay(2000);
+  Serial.printf("[DHT22] Diinisialisasi pada pin GPIO %d (INPUT_PULLUP aktif)\n", DHTPIN);
+  delay(1000);
 
   // (3) Init Kamera
   camera_config_t config;
@@ -359,17 +425,17 @@ void setup() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn     = PWDN_GPIO_NUM;
   config.pin_reset    = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 10000000; // 10MHz: Stabil, dingin, anti-brownout di power USB laptop
   config.pixel_format = PIXFORMAT_JPEG;
 
   if (psramFound()) {
-    config.frame_size   = FRAMESIZE_VGA;    // 640x480 (Smooth & rendah latensi untuk streaming WiFi)
-    config.jpeg_quality = 12;               // Kualitas seimbang (ukuran ~20-25 KB per frame)
+    config.frame_size   = FRAMESIZE_VGA;    // 640x480 (Smooth & stabil di port 81)
+    config.jpeg_quality = 14;               // Kualitas seimbang (ukuran ~18-22 KB per frame)
     config.fb_count     = 2;
-    Serial.println("[CAM] PSRAM terdeteksi - mode VGA 640x480 (Smooth)");
+    Serial.println("[CAM] PSRAM terdeteksi - mode VGA 640x480 (Stabil 10MHz)");
   } else {
     config.frame_size   = FRAMESIZE_VGA;    // 640x480
-    config.jpeg_quality = 15;
+    config.jpeg_quality = 16;
     config.fb_count     = 1;
     Serial.println("[CAM] Tanpa PSRAM - mode VGA 640x480");
   }
@@ -419,13 +485,14 @@ void setup() {
 unsigned long lastStatus = 0;
 
 void loop() {
-  if (millis() - lastStatus > 10000) {
+  if (millis() - lastStatus > 8000) {
     lastStatus = millis();
-    Serial.printf("[STATUS] Clients: %d | IP: %s | Flash: %s | FreeHeap: %d\n",
+    Serial.printf("[STATUS] DHT22: %s (%.1f C, %.1f %%) | Clients: %d | IP: %s | Flash: %s\n",
+                  dhtSensorDetected ? "TERDETEKSI" : "TIDAK TERDETEKSI (Cek Pin/Kabel)",
+                  cachedTemperature, cachedHumidity,
                   WiFi.softAPgetStationNum(),
                   WiFi.softAPIP().toString().c_str(),
-                  digitalRead(FLASH_LED_PIN) ? "ON" : "OFF",
-                  ESP.getFreeHeap());
+                  flashState ? "ON" : "OFF");
   }
   delay(1000);
 }

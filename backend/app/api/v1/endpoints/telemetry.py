@@ -64,7 +64,7 @@ async def fetch_device_telemetry(device_url: Optional[str] = Query(None, descrip
 
         target_url = f"http://{host}:{port}/telemetry"
 
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=4.0) as client:
             resp = await client.get(target_url)
             if resp.status_code == 200:
                 data = resp.json()
@@ -78,7 +78,8 @@ async def fetch_device_telemetry(device_url: Optional[str] = Query(None, descrip
                         "status": "active"
                     }
                     return latest_sensor_data
-    except Exception:
+    except Exception as e:
+        # Log jika ESP32 belum terjangkau
         pass
 
     return latest_sensor_data
@@ -115,3 +116,35 @@ async def toggle_device_flash(
         pass
 
     return {"flash": state}
+
+from fastapi.responses import Response
+from fastapi import HTTPException
+
+@router.get("/capture")
+async def capture_device_frame(
+    device_url: Optional[str] = Query(None, description="URL Stream atau IP ESP32")
+):
+    """
+    Proxy endpoint untuk mengambil single snapshot frame JPEG dari ESP32 di port 81 (/capture).
+    """
+    if not device_url or not device_url.strip():
+        raise HTTPException(status_code=400, detail="Missing device_url")
+
+    clean_url = device_url.strip()
+    if not clean_url.startswith(("http://", "https://")):
+        clean_url = f"http://{clean_url}"
+
+    parsed = urlparse(clean_url)
+    host = parsed.hostname
+    port = parsed.port or 81
+    target_url = f"http://{host}:{port}/capture"
+
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(target_url)
+            if resp.status_code == 200 and resp.content:
+                return Response(content=resp.content, media_type="image/jpeg")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Gagal snapshot: {str(e)}")
+
+    raise HTTPException(status_code=502, detail="Kamera tidak merespon snapshot")

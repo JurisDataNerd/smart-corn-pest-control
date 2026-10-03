@@ -49,80 +49,89 @@ export const LiveMonitorView: React.FC = () => {
   });
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isDetecting, setIsDetecting] = useState<boolean>(false);
-  const [autoDetect, setAutoDetect] = useState<boolean>(true);
+  const [autoDetect, setAutoDetect] = useState<boolean>(false);
   const [detectionResult, setDetectionResult] = useState<DetectionResponse | null>(null);
   const [showSettings, setShowSettings] = useState<boolean>(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
   const [notifGranted, setNotifGranted] = useState<boolean>(isNotificationGranted());
-  const [flashOn, setFlashOn] = useState<boolean>(true);
+  const [flashOn, setFlashOn] = useState<boolean>(false);
+  const [streamError, setStreamError] = useState<boolean>(false);
 
   const imgRef = useRef<HTMLImageElement>(null);
+  const isDetectingRef = useRef<boolean>(false);
 
   // Sinkronkan status izin saat tampilan dibuka
   useEffect(() => {
     setNotifGranted(isNotificationGranted());
   }, []);
 
-  // Ambil gambar snapshot dari stream untuk deteksi YOLO
+  // Ambil gambar snapshot dari stream untuk deteksi hama (Ultra-cepat & tanpa tainted canvas)
   const runDetectionOnFrame = async () => {
-    if (!imgRef.current || !isConnected || isDetecting) return;
+    if (!isConnected || isDetectingRef.current) return;
+    isDetectingRef.current = true;
     setIsDetecting(true);
+
     try {
-      const img = imgRef.current;
-      if (!img.complete || img.naturalWidth === 0) {
+      let imageBlob: Blob | null = null;
+
+      // 1. Coba ambil frame bersih resolusi tinggi via proxy backend /api/v1/telemetry/capture
+      try {
+        const resp = await fetch(`/api/v1/telemetry/capture?device_url=${encodeURIComponent(streamUrl)}`);
+        if (resp.ok) {
+          imageBlob = await resp.blob();
+        }
+      } catch (err) {
+        console.warn('Proxy snapshot gagal, mencoba canvas fallback:', err);
+      }
+
+      // 2. Fallback ambil dari elemen <img> via canvas
+      if (!imageBlob && imgRef.current && imgRef.current.complete && imgRef.current.naturalWidth > 0) {
+        const img = imgRef.current;
+        const targetWidth = Math.min(img.naturalWidth || 640, 640);
+        const targetHeight = Math.min(img.naturalHeight || 480, 480);
+        const canvas = document.createElement('canvas');
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+          imageBlob = await new Promise<Blob | null>((resolve) =>
+            canvas.toBlob(resolve, 'image/jpeg', 0.75)
+          );
+        }
+      }
+
+      if (!imageBlob) {
+        isDetectingRef.current = false;
         setIsDetecting(false);
         return;
       }
 
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth || 800;
-      canvas.height = img.naturalHeight || 600;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        setIsDetecting(false);
-        return;
+      const res = await detectFromImage(imageBlob, undefined, false, 0.25);
+      setDetectionResult(res);
+
+      if (res.detections && res.detections.length > 0) {
+        const topSpecies = res.detections[0].class_name;
+        const translatedName = INDONESIAN_PEST_NAMES[topSpecies] || topSpecies;
+        notifyPestDetected(translatedName, res.detections.length);
       }
-
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, 0, 0);
-
-      canvas.toBlob(async (blob) => {
-        if (!blob) {
-          setIsDetecting(false);
-          return;
-        }
-        try {
-          const res = await detectFromImage(blob, undefined, false, 0.25);
-          setDetectionResult(res);
-
-          // Kirim Push Notification otomatis jika ditemukan hama
-          if (res.detections && res.detections.length > 0) {
-            const topSpecies = res.detections[0].class_name;
-            const translatedName = INDONESIAN_PEST_NAMES[topSpecies] || topSpecies;
-            notifyPestDetected(translatedName, res.detections.length);
-          }
-        } catch (err) {
-          console.error('Gagal deteksi frame:', err);
-        } finally {
-          setIsDetecting(false);
-        }
-      }, 'image/jpeg', 0.95);
     } catch (err) {
-      console.error('Gagal memproses frame kamera:', err);
+      console.warn('Gagal deteksi frame:', err);
+    } finally {
+      isDetectingRef.current = false;
       setIsDetecting(false);
     }
   };
 
-  // Auto deteksi berkala jika diaktifkan
+  // Auto deteksi berkala (hanya aktif jika dicentang oleh pengguna)
   useEffect(() => {
     if (!isConnected || !autoDetect) return;
     const timer = setInterval(() => {
       runDetectionOnFrame();
-    }, 4000);
+    }, 12000);
     return () => clearInterval(timer);
-  }, [isConnected, autoDetect, isDetecting]);
+  }, [isConnected, autoDetect]);
 
   // Helper normalisasi URL kamera ESP32
   const normalizeStreamUrl = (raw: string): string => {
@@ -144,42 +153,49 @@ export const LiveMonitorView: React.FC = () => {
     localStorage.setItem('smart_trap_stream_url', val);
   };
 
+  const isFetchingTelemetryRef = useRef<boolean>(false);
+
   // Pantau sensor suhu dan kelembapan DHT22 secara realtime (100% Dinamis dari ESP32)
   useEffect(() => {
     let isMounted = true;
 
     const getTelemetry = async () => {
+      if (isFetchingTelemetryRef.current) return;
+      isFetchingTelemetryRef.current = true;
+
       try {
         let data: TelemetryData | null = null;
 
-        // 1. Ambil data langsung dari alamat ESP32 via backend proxy (bebas blokir CORS & PNA browser)
+        // Ambil data via backend proxy (Aman, bebas blokir CORS & Private Network Access browser)
         if (isConnected && streamUrl) {
           try {
             data = await fetchDeviceTelemetry(streamUrl);
-          } catch (err) {
-            console.warn('Gagal membaca data dari perangkat ESP32:', err);
+          } catch {
+            // Abaikan jika device sedang buffering
           }
         }
 
-        // 2. Jika belum connect atau perangkat tidak mengirim data, fallback ke latest
+        // Fallback ke latest telemetry jika belum connect
         if (!data || data.temperature === null) {
-          data = await fetchLatestTelemetry();
+          try {
+            data = await fetchLatestTelemetry();
+          } catch {
+            // Abaikan
+          }
         }
 
         if (isMounted) {
-          // Hanya set telemetry jika nilai valid dan bukan null
           if (data && data.temperature !== null && data.humidity !== null) {
             setTelemetry(data);
-            // Kirim Push Notification jika suhu / kelembapan DHT22 tidak ideal saat terhubung
             if (isConnected) {
               notifyDHT22Alert(data.temperature, data.humidity);
             }
-          } else {
-            setTelemetry(null);
           }
         }
       } catch (err) {
-        console.warn('Gagal mengambil data sensor DHT22:', err);
+        console.warn('Gagal membaca data sensor:', err);
+      } finally {
+        isFetchingTelemetryRef.current = false;
       }
     };
 
@@ -188,7 +204,7 @@ export const LiveMonitorView: React.FC = () => {
       if (isConnected) {
         getTelemetry();
       }
-    }, 3500);
+    }, 4000);
 
     return () => {
       isMounted = false;
@@ -220,6 +236,7 @@ export const LiveMonitorView: React.FC = () => {
 
   const handleConnect = () => {
     setConnectionError(null);
+    setStreamError(false);
     const normalized = normalizeStreamUrl(streamUrl);
     if (!normalized) {
       setConnectionError('Masukkan alamat IP ESP32-CAM terlebih dahulu.');
@@ -228,11 +245,12 @@ export const LiveMonitorView: React.FC = () => {
     setStreamUrl(normalized);
     localStorage.setItem('smart_trap_stream_url', normalized);
     setIsConnected(true);
-    setAutoDetect(true);
+    setAutoDetect(false);
   };
 
   const handleDisconnect = () => {
     setIsConnected(false);
+    setStreamError(false);
     setAutoDetect(false);
     setDetectionResult(null);
     setConnectionError(null);
@@ -494,17 +512,53 @@ export const LiveMonitorView: React.FC = () => {
         <div className="lg:col-span-2 space-y-3">
           <div className="relative aspect-video w-full rounded-2xl overflow-hidden bg-slate-900 border border-slate-800 shadow-xs flex items-center justify-center">
             {isConnected ? (
-              <img
-                ref={imgRef}
-                src={streamUrl}
-                crossOrigin="anonymous"
-                alt="Live Monitor ESP32-CAM"
-                className="h-full w-full object-contain filter contrast-[1.05] saturate-[1.08] brightness-[1.02] transition-all"
-                onError={() => {
-                  setConnectionError('Tidak dapat memuat stream dari alamat IP tersebut. Pastikan ESP32-CAM sudah menyala dan terhubung pada jaringan yang sama.');
-                  setIsConnected(false);
-                }}
-              />
+              <>
+                <img
+                  ref={imgRef}
+                  src={streamUrl}
+                  alt="Live Monitor ESP32-CAM"
+                  className="h-full w-full object-contain filter contrast-[1.05] saturate-[1.08] brightness-[1.02] transition-all"
+                  onLoad={() => setStreamError(false)}
+                  onError={() => {
+                    setStreamError(true);
+                    console.warn('Stream buffering atau reconnecting...');
+                  }}
+                />
+                {streamError && (
+                  <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-center z-10 animate-fade-in">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 mb-3">
+                      <WifiOff className="h-6 w-6" />
+                    </div>
+                    <h4 className="text-sm font-bold text-white mb-1">
+                      Koneksi ke ESP32 Terputus (ERR_ADDRESS_UNREACHABLE)
+                    </h4>
+                    <p className="text-xs text-slate-300 max-w-md leading-relaxed mb-4">
+                      Laptop Anda saat ini tidak tersambung ke WiFi ESP32. Sambungkan kembali WiFi laptop Anda ke Hotspot:
+                      <br />
+                      <strong className="text-emerald-400 font-mono text-sm">SmartTrap-CAM</strong> • Sandi: <strong className="text-emerald-400 font-mono text-sm">12345678</strong>
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          setStreamError(false);
+                          if (imgRef.current) {
+                            imgRef.current.src = `${streamUrl}?t=${Date.now()}`;
+                          }
+                        }}
+                        className="rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-1.5 text-xs font-semibold shadow-xs active:scale-95 transition-all"
+                      >
+                        Hubungkan Ulang
+                      </button>
+                      <button
+                        onClick={handleDisconnect}
+                        className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 px-3.5 py-1.5 text-xs font-semibold shadow-xs active:scale-95 transition-all"
+                      >
+                        Tutup
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
             ) : (
               <div className="text-center p-6 sm:p-8">
                 <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-800 border border-slate-700 text-slate-400 mb-3">
@@ -557,7 +611,7 @@ export const LiveMonitorView: React.FC = () => {
                     onChange={(e) => setAutoDetect(e.target.checked)}
                     className="rounded border-slate-300 text-emerald-600 focus:ring-0"
                   />
-                  <span>Deteksi Otomatis (Tiap 4 Detik)</span>
+                  <span>Auto-Scan Berkala (Tiap 12 Detik - Opsional)</span>
                 </label>
               </div>
             </div>
@@ -604,10 +658,11 @@ export const LiveMonitorView: React.FC = () => {
           </div>
 
           {/* Info Singkat Alat */}
+          {/* Info Singkat Alat */}
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs dark:border-slate-800 dark:bg-slate-900/60 text-slate-600 dark:text-slate-400 space-y-1.5">
-            <div className="font-semibold text-slate-700 dark:text-slate-300">Catatan Perangkat ESP32 + DHT22:</div>
+            <div className="font-semibold text-slate-700 dark:text-slate-300">Catatan Perangkat:</div>
             <p className="leading-relaxed">
-              Kamera monitor ini disiapkan untuk menerima gambar dari modul ESP32-CAM serta data sensor suhu dan kelembapan DHT22. Saat alat sudah dirakit dan aktif di lahan, angka pengukuran akan otomatis tampil di layar.
+              Monitoring realtime ESP32-CAM dengan sensor DHT22. Sistem berjalan ringan dan responsif.
             </p>
           </div>
         </div>

@@ -21,13 +21,13 @@ const INDONESIAN_PEST_NAMES: Record<string, string> = {
 const CAPTURE_COOLDOWN_MS = 4000; // Minimal 4 detik antar capture (ESP32 butuh istirahat)
 const AUTO_DETECT_INTERVAL_MS = 20000; // Auto-scan tiap 20 detik (bukan 12)
 const CAPTURE_TIMEOUT_MS = 8000; // Timeout capture (backend retry butuh waktu)
-const DEFAULT_STREAM_URL = "http://192.168.11.186:81/stream"; // ← IP router, bukan hotspot
+const DEFAULT_STREAM_URL = "http://172.20.10.5:81/stream"; // IP aktif ESP32 di jaringan saat ini
 
 export const LiveMonitorView: React.FC = () => {
   const [streamUrl, setStreamUrl] = useState<string>(() => {
     const saved = localStorage.getItem("smart_trap_stream_url");
-    // Auto-fix kalau masih pakai default lama (192.168.4.1 atau 192.168.1.100)
-    if (!saved || saved.includes("192.168.1.100") || saved.includes("192.168.4.1")) {
+    // Reset jika masih tersimpan domain mDNS yang gagal resolve atau IP lama
+    if (!saved || saved.includes("smarttrap.local") || saved.includes("192.168.11.186") || saved.includes("192.168.1.100") || saved.includes("192.168.4.1")) {
       return DEFAULT_STREAM_URL;
     }
     return saved;
@@ -459,7 +459,7 @@ export const LiveMonitorView: React.FC = () => {
                 type="text"
                 value={streamUrl}
                 onChange={(e) => handleStreamUrlChange(e.target.value)}
-                placeholder="Contoh: http://192.168.11.186:81/stream"
+                placeholder="Contoh: http://smarttrap.local:81/stream atau http://192.168.1.50:81/stream"
                 className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-mono text-slate-800 focus:border-emerald-500 focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
               />
             </div>

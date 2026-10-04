@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "dev": "bun --parallel --no-orphans run dev:backend dev:frontend",
-    "dev:backend": "bash -c 'PYTHONPATH=. ./backend/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload'",
+    "dev:backend": "bash -c 'PYTHONPATH=. ./backend/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir backend'",
     "dev:frontend": "bun --cwd frontend dev --port 5173",
     "backend": "bun run dev:backend",
     "frontend": "bun run dev:frontend",

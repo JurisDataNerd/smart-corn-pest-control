@@ -1,0 +1,47 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: smarttrap-backend
+    restart: unless-stopped
+    volumes:
+      - smarttrap-data:/app/backend/uploads
+      - smarttrap-db:/app/backend
+    environment:
+      - PROJECT_NAME=Smart Trap AI
+      - DEBUG=False
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
+    networks:
+      - smarttrap-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: smarttrap-frontend
+    restart: unless-stopped
+    ports:
+      # Port 8085 di host diarahkan ke Nginx container (Aman, tidak bentrok dengan Medskill)
+      - "8085:80"
+    depends_on:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - smarttrap-net
+
+volumes:
+  smarttrap-data:
+  smarttrap-db:
+
+networks:
+  smarttrap-net:
+    driver: bridge

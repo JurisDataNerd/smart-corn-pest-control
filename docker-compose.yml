@@ -7,7 +7,6 @@ services:
     restart: unless-stopped
     volumes:
       - smarttrap-data:/app/backend/uploads
-      - smarttrap-db:/app/backend
     environment:
       - PROJECT_NAME=Smart Trap AI
       - DEBUG=False
@@ -40,7 +39,6 @@ services:
 
 volumes:
   smarttrap-data:
-  smarttrap-db:
 
 networks:
   smarttrap-net:
